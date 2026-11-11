@@ -1,24 +1,26 @@
 #include "commands.h"
 #include "datamodel.h"
-#include "documents.h" // <-- ADD
+#include "documents.h"
 #include "editing_utils.h"
 #include "fonts.h"
-#include "fs_utils.h" // <-- ADD
+#include "fs_utils.h"
 #include "icons.h"
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include "imgui_rich_md/rich_md.h"
 #include "imgui_stdlib.h"
-#include "session.h"         // <-- ADD
-#include "tinyfiledialogs.h" // <-- ADD
+#include "session.h"
+#include "tinyfiledialogs.h"
 #include "ui/debug_utils.h"
 #include "ui/document_view.h"
 #include "ui/sidebar.h"
+#include "ui/theme.h"
 #include "ui/toolbar.h"
 #include "window_icon.h"
 
 #include <GLFW/glfw3.h>
+#include <cmath>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -97,16 +99,30 @@ int main() {
   glfwSwapInterval(1);
   applyWindowIcon(window, std::string(MDNOTES_ASSETS_DIR) + "/appicon.png");
 
+  // Query DPI scale so font rasterization is crisp on HiDPI displays.
+  float sx = 1.0f, sy = 1.0f;
+  glfwGetWindowContentScale(window, &sx, &sy);
+  (void)sx;
+  float dpiScale = (sy > 0.0f) ? sy : 1.0f;
+  if (dpiScale < 1.0f)
+    dpiScale = 1.0f;
+  if (dpiScale > 3.0f)
+    dpiScale = 3.0f;
+
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGuiIO &io = ImGui::GetIO();
   ImGui::StyleColorsDark();
+  applyAppTheme(); // <-- Atom One Dark chrome
 
   tinyfd_messageBox("tinyfd_query", "", "", "", 0);
   std::cerr << "tinyfd backend: " << tinyfd_response << "\n";
 
-  io.Fonts->AddFontDefault();
-  loadIconFont(13.0f);
+  // Fonts: Cousine (main) + IcoMoon icons. Larger than before (13 -> 16/15)
+  // and DPI-aware for smooth rendering.
+  loadMainFont(16.0f, dpiScale);
+  loadIconFont(15.0f * dpiScale, dpiScale);
+  loadContentFonts(dpiScale);
 
   ImGui_ImplGlfw_InitForOpenGL(window, true);
   ImGui_ImplOpenGL3_Init(glsl_version);
@@ -126,6 +142,27 @@ int main() {
     glfwPollEvents();
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
+
+    // ---------------------------------------------------------------------
+    // ImGui 1.93.0 workaround: fractional framebuffer scale (HiDPI/Wayland
+    // factors such as 1.15 or 1.25) makes ImGui's internal pixel density
+    // fractional. When a modal popup dims the background, ImGui draws a
+    // full-viewport AddRectFilled() and asserts that it produced exactly 6
+    // indices; with fractional density AddRectFilled() takes the
+    // anti-aliased path, produces more indices, and the app aborts.
+    //
+    // Our fonts are already rasterized for the real DPI through
+    // ImFontConfig::RasterizerDensity, so compute the ImGui frame at pixel
+    // density 1 and give the real framebuffer scale back to the renderer
+    // after Render(). Layout and font sizes are unchanged.
+    // ---------------------------------------------------------------------
+    const ImVec2 framebuffer_scale = io.DisplayFramebufferScale;
+    const bool fractional_scale =
+        framebuffer_scale.x != std::floor(framebuffer_scale.x) ||
+        framebuffer_scale.y != std::floor(framebuffer_scale.y);
+    if (fractional_scale)
+      io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+
     ImGui::NewFrame();
 
     // Shortcuts
@@ -137,6 +174,18 @@ int main() {
         !doSaveAs && ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S);
     bool doFind = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_F);
     bool open_icon_grid = false;
+    // Font size shortcuts.
+    bool doFontLarger =
+        ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Equal) ||
+        ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift |
+                                 ImGuiKey_Equal) ||
+        ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_KeypadAdd);
+    bool doFontSmaller =
+        ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Minus) ||
+        ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_KeypadSubtract);
+    bool doFontReset =
+        ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_0) ||
+        ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Keypad0);
 
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(io.DisplaySize);
@@ -199,9 +248,15 @@ int main() {
         ImGui::Separator();
         ImGui::MenuItem("Sidebar", nullptr, &app.sidebar_visible);
         ImGui::Separator();
+        if (ImGui::MenuItem("Increase Font Size", "Ctrl++"))
+          doFontLarger = true;
+        if (ImGui::MenuItem("Decrease Font Size", "Ctrl+-"))
+          doFontSmaller = true;
+        if (ImGui::MenuItem("Reset Font Size", "Ctrl+0"))
+          doFontReset = true;
+        ImGui::Separator();
         if (ImGui::MenuItem("Debug: Icon Grid"))
           open_icon_grid = true;
-        ;
         ImGui::EndMenu();
       }
       ImGui::EndMenuBar();
@@ -210,47 +265,66 @@ int main() {
     // Handle shortcut-driven actions
     if (doNew)
       commandNew(app);
-    if (doOpen)
+    if (doOpen) {
       commandOpen(app);
-    if (doSave)
+      invalidateSidebarCache();
+    }
+    if (doSave) {
       commandSave(app);
-    if (doSaveAs)
+      invalidateSidebarCache();
+    }
+    if (doSaveAs) {
       commandSaveAs(app);
+      invalidateSidebarCache();
+    }
     if (doFind)
       commandFind(app);
+    if (doFontLarger) {
+      int last = getContentFontCount() - 1;
+      if (last >= 0 && app.content_font_idx < last)
+        ++app.content_font_idx;
+    }
+    if (doFontSmaller) {
+      if (app.content_font_idx > 0)
+        --app.content_font_idx;
+    }
+    if (doFontReset) {
+      app.content_font_idx = getDefaultContentFontIdx();
+    }
 
     tickAutoSave(app, ImGui::GetIO().DeltaTime);
 
     // Toolbar: 4 buttons (3 view modes + sidebar toggle), right-aligned
-    {
-      const float bw = 32.0f, gap = 4.0f;
-      const float total = 4 * bw + 3 * gap;
-      ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x - total);
-
-      viewToggleButton(ICON_SPLIT_VIEW, "Split view (Ctrl+1)", app.viewMode,
-                       ViewMode::Split, app.viewMode);
-      ImGui::SameLine(0, gap);
-      viewToggleButton(ICON_EDIT_ONLY, "Editor only (Ctrl+2)", app.viewMode,
-                       ViewMode::EditOnly, app.viewMode);
-      ImGui::SameLine(0, gap);
-      viewToggleButton(ICON_PREVIEW_ONLY, "Preview only (Ctrl+3)", app.viewMode,
-                       ViewMode::PreviewOnly, app.viewMode);
-      ImGui::SameLine(0, gap);
-
-      const bool sideActive = app.sidebar_visible;
-      if (sideActive) {
-        ImGui::PushStyleColor(ImGuiCol_Button,
-                              ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
-      }
-      if (ImGui::Button(ICON_SIDEBAR, ImVec2(bw, 28)))
-        app.sidebar_visible = !app.sidebar_visible;
-      if (sideActive)
-        ImGui::PopStyleColor(2);
-      if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Toggle sidebar");
-    }
-    ImGui::Separator();
+    // {
+    //   const float bw = 32.0f, gap = 4.0f;
+    //   const float total = 4 * bw + 3 * gap;
+    //   ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x - total);
+    //
+    //   viewToggleButton(ICON_SPLIT_VIEW, "Split view (Ctrl+1)", app.viewMode,
+    //                    ViewMode::Split, app.viewMode);
+    //   ImGui::SameLine(0, gap);
+    //   viewToggleButton(ICON_EDIT_ONLY, "Editor only (Ctrl+2)", app.viewMode,
+    //                    ViewMode::EditOnly, app.viewMode);
+    //   ImGui::SameLine(0, gap);
+    //   viewToggleButton(ICON_PREVIEW_ONLY, "Preview only (Ctrl+3)",
+    //   app.viewMode,
+    //                    ViewMode::PreviewOnly, app.viewMode);
+    //   ImGui::SameLine(0, gap);
+    //
+    //   const bool sideActive = app.sidebar_visible;
+    //   if (sideActive) {
+    //     ImGui::PushStyleColor(ImGuiCol_Button,
+    //                           ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+    //     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+    //   }
+    //   if (ImGui::Button(ICON_SIDEBAR, ImVec2(bw, 28)))
+    //     app.sidebar_visible = !app.sidebar_visible;
+    //   if (sideActive)
+    //     ImGui::PopStyleColor(2);
+    //   if (ImGui::IsItemHovered())
+    //     ImGui::SetTooltip("Toggle sidebar");
+    // }
+    // ImGui::Separator();
 
     // Body: sidebar + tabs
     if (app.sidebar_visible) {
@@ -266,6 +340,15 @@ int main() {
           "No document open.  File \xe2\x86\x92 New  (Ctrl+N)  or  File "
           "\xe2\x86\x92 Open  (Ctrl+O).");
     } else {
+      const ImGuiStyle &tabStyle = ImGui::GetStyle();
+      ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                          ImVec2(tabStyle.FramePadding.x + 4.0f,
+                                 kTabFramePaddingY));
+      ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing,
+                          ImVec2(0.0f, tabStyle.ItemInnerSpacing.y));
+      ImGui::PushStyleColor(ImGuiCol_Border,
+                            ImVec4(0.29f, 0.29f, 0.29f, 1.0f)); // #4a4a4a
+
       int closeRequested = -1;
       if (ImGui::BeginTabBar("##doc_tabs",
                              ImGuiTabBarFlags_Reorderable |
@@ -281,7 +364,7 @@ int main() {
           if (ImGui::BeginTabItem(label, &tabOpen, ImGuiTabItemFlags_None)) {
             app.active = i;
             ImGui::BeginChild("##doc_body", ImVec2(0, 0), false);
-            renderDocumentContent(d, app.viewMode);
+            renderDocumentContent(d, app.viewMode, app.content_font_idx);
             ImGui::EndChild();
             ImGui::EndTabItem();
           }
@@ -290,6 +373,11 @@ int main() {
         }
         ImGui::EndTabBar();
       }
+      // The style pushes above must be popped even when BeginTabBar()
+      // returns false (e.g. zero-height tab bar). Popping them inside the
+      // if-block leaks the style stack and corrupts later frames.
+      ImGui::PopStyleColor();
+      ImGui::PopStyleVar(2);
 
       if (closeRequested >= 0) {
         Document &d = app.docs[closeRequested];
@@ -315,8 +403,10 @@ int main() {
 
     ImGui::EndChild();
 
-    // Find / Replace modal
-    if (app.find_replace.open)
+    // Find / Replace modal. Only call OpenPopup() when it is not already
+    // open: calling it every frame resets the popup's state and is not
+    // needed once BeginPopupModal() owns it.
+    if (app.find_replace.open && !ImGui::IsPopupOpen("Find & Replace"))
       ImGui::OpenPopup("Find & Replace");
     if (ImGui::BeginPopupModal("Find & Replace", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -355,14 +445,79 @@ int main() {
       }
       ImGui::EndPopup();
     }
-    if (open_icon_grid)
+        if (open_icon_grid)
       ImGui::OpenPopup("Icon Grid");
 
     renderIconDebugPopup();
-    ImGui::End();
+
+    // ---------------------------------------------------------------------
+    // Floating view controls — absolutely-positioned child window inside
+    // ##root so it is guaranteed to be submitted (and therefore drawn) as
+    // part of the same window, just overlaid on top of the tab strip.
+    // ---------------------------------------------------------------------
+    {
+      const float bw = 32.0f, bh = 28.0f;
+      const float gap = 4.0f, winPad = 6.0f, margin = 8.0f, borderSz = 1.0f;
+      const int   n = 4;
+      const float totalW = n * bw + (n - 1) * gap;
+      const float panelW = totalW + 2 * winPad + 2 * borderSz;
+      const float panelH = bh     + 2 * winPad + 2 * borderSz;
+
+      // Place its top-right corner just under the menu bar, right-aligned.
+      ImGui::SetCursorPos(ImVec2(
+          ImGui::GetWindowWidth() - panelW - margin,
+          ImGui::GetFrameHeight() + margin));
+
+      ImVec4 bgDark = ImGui::GetStyleColorVec4(ImGuiCol_MenuBarBg);
+      ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+
+      ImGui::PushStyleColor(ImGuiCol_ChildBg,
+                            ImVec4(bgDark.x, bgDark.y, bgDark.z, 0.95f));
+      ImGui::PushStyleColor(
+          ImGuiCol_Border, ImVec4(accent.x, accent.y, accent.z, 0.5f));
+      ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+      ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, borderSz);
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(winPad, winPad));
+      ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, 0));
+
+      ImGui::BeginChild("##view_controls", ImVec2(panelW, panelH), true,
+                        ImGuiWindowFlags_NoScrollbar |
+                            ImGuiWindowFlags_NoScrollWithMouse);
+
+      viewToggleButton(ICON_SPLIT_VIEW, "Split view (Ctrl+1)", app.viewMode,
+                       ViewMode::Split, app.viewMode);
+      ImGui::SameLine(0, gap);
+      viewToggleButton(ICON_EDIT_ONLY, "Editor only (Ctrl+2)", app.viewMode,
+                       ViewMode::EditOnly, app.viewMode);
+      ImGui::SameLine(0, gap);
+      viewToggleButton(ICON_PREVIEW_ONLY, "Preview only (Ctrl+3)", app.viewMode,
+                       ViewMode::PreviewOnly, app.viewMode);
+      ImGui::SameLine(0, gap);
+
+      const bool sideActive = app.sidebar_visible;
+      if (sideActive) {
+        ImGui::PushStyleColor(ImGuiCol_Button,
+                              ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+      }
+      if (ImGui::Button(ICON_SIDEBAR, ImVec2(bw, bh)))
+        app.sidebar_visible = !app.sidebar_visible;
+      if (sideActive)
+        ImGui::PopStyleColor(2);
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Toggle sidebar");
+
+      ImGui::EndChild();
+      ImGui::PopStyleVar(4);
+      ImGui::PopStyleColor(2);
+    }
+
+    ImGui::End();  // end ##root
 
     // Render
     ImGui::Render();
+    if (fractional_scale)
+      ImGui::GetDrawData()->FramebufferScale = framebuffer_scale;
     int w, h;
     glfwGetFramebufferSize(window, &w, &h);
     glViewport(0, 0, w, h);

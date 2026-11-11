@@ -34,6 +34,8 @@ struct AppState {
   std::string sidebar_root;
   bool sidebar_visible = true;
 
+  int content_font_idx = 2;
+
   float autosave_interval = 30.0f;
   float autosave_timer = 0.0f;
 

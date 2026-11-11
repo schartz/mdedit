@@ -12,6 +12,7 @@ void saveSession(const AppState &app) {
   j["recent_files"] = app.recent_files;
   j["sidebar_root"] = app.sidebar_root;
   j["view_mode"] = (int)app.viewMode;
+  j["content_font_idx"] = app.content_font_idx;
 
   nlohmann::json docsJson = nlohmann::json::array();
   for (const auto &d : app.docs) {
@@ -42,6 +43,8 @@ void loadSession(AppState &app) {
     return;
   }
 
+  if (j.contains("content_font_idx"))
+    app.content_font_idx = j["content_font_idx"].get<int>();
   if (j.contains("recent_files"))
     app.recent_files = j["recent_files"].get<std::vector<std::string>>();
   if (j.contains("sidebar_root"))

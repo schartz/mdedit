@@ -14,7 +14,7 @@ include(FetchContent)
 FetchContent_Declare(
   imgui
   GIT_REPOSITORY https://github.com/ocornut/imgui.git
-  GIT_TAG v1.92.5)
+  GIT_TAG v1.93.0)
 FetchContent_MakeAvailable(imgui)
 
 add_library(
@@ -34,6 +34,9 @@ target_include_directories(
 target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
 
 # --- imgui_rich_md ---
+set(IMGUI_RICHMD_WITH_DOWNLOAD_IMAGES
+    ON
+    CACHE BOOL "" FORCE)
 FetchContent_Declare(
   imgui_rich_md
   GIT_REPOSITORY https://github.com/pthom/imgui_rich_md.git
@@ -86,6 +89,7 @@ add_executable(
   src/main.cpp
   src/window_icon.cpp
   src/fonts.cpp
+  src/ui/theme.cpp
   src/ui/debug_utils.cpp
   src/ui/document_view.cpp
   src/ui/sidebar.cpp
